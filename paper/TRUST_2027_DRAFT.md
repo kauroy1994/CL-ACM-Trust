@@ -9,7 +9,7 @@ Imagine a neural network that has just learned to distinguish handwritten zeros 
 
 But a smaller network is not necessarily a reliable substitute. Suppose the original network and the smaller network both classify 95% of handwritten zeros and ones correctly. They might nevertheless make mistakes on different images. Replacing the original solution could therefore lose abilities the system previously had, even though average accuracy appears unchanged.
 
-We investigate this replacement decision through FAMP. For each new task, a shared neural network first learns to solve it; we call this the **current network**. FAMP then considers compact networks that might preserve that task's solution. It chooses a proposed replacement using one group of examples, and tests that replacement using a separate group that was not used to choose it. The test asks how often the compact network makes mistakes on images the current network classified correctly. Because only finitely many images are available, FAMP also estimates how uncertain that observed mistake rate is. Additional checks require the current network to meet a minimum measured accuracy and the two networks to give reasonably similar prediction probabilities. If the checks pass, the compact network is stored and protected from changes during later training. If they fail, the task continues using the current network, with saved examples available for subsequent learning. These checks provide limited evidence about a replacement; they do not establish that either network is universally correct.
+We investigate this replacement decision through FAMP. For each new task, a shared neural network first learns to solve it; we call this the **current network**. FAMP then considers compact networks that might preserve that task's solution. It chooses a proposed replacement using one group of examples, and tests that replacement using a separate group that was not used to choose it. The test asks how often the compact network makes mistakes on images the current network classified correctly. Because only finitely many images are available, FAMP also estimates how uncertain that observed mistake rate is. Additional checks require the current network to meet a minimum measured accuracy and the two networks to give reasonably similar prediction probabilities. If the checks pass, the compact network is stored and protected from changes during later training. If they fail, the task remains assigned to the shared network, which continues training on later tasks while retaining some examples from tasks that have not received a frozen solution. Rejection therefore does not itself prevent forgetting. These checks provide limited evidence about a replacement; they do not establish that either network is universally correct.
 
 We evaluate both the reliability of this decision procedure and the usefulness of the complete learner. In 6,000 controlled trials where the underlying mistake rates are known, the statistical estimates were conservative; none of the 1,800 tested proposals whose true damaging-mistake rate exceeded the allowed limit was accepted. We also evaluated nine continual-learning methods in 162 CPU runs using five-task streams derived from the small scikit-learn handwritten Digits dataset. FAMP obtained mean final accuracies of **99.22%** for digit-pair tasks, **95.47%** for rotated digits, and **96.00%** for noisy digits. It outperformed ordinary example replay on the first two settings, but did not outperform a version that stored compact networks without the additional acceptance checks. It also showed **no sharing of stored network components between tasks**, required more retained memory than replay, and was less accurate than replay-based methods on noisy digits. Thus, while the experiments demonstrate an inspectable process for deciding what to preserve, they do not demonstrate the originally hoped-for memory savings through reusable computations. Reliable checking, successful learning, and efficient reuse must be evaluated separately.
 
@@ -58,6 +58,12 @@ The central empirical findings are mixed. FAMP's frozen paths can retain high ta
 
 ---
 
+### 1.5 A map of the system before the technical details
+
+To avoid confusing the objects involved, we use the following names consistently. The **shared network** is the ordinary neural model being updated as tasks arrive. For the task currently under consideration, its predictions serve as the **reference** (also called the *teacher* in the equations); it is not a separately supplied expert. A **candidate** is a newly trained compact solution, or a new classifier built on a previously stored feature extractor. A **published route** is the system's instruction to use a particular frozen compact solution for a particular task. A **fallback route** means that task continues to use the shared network, with some retained training examples. The **selection set** is used to choose one candidate; the distinct **acceptance set** is used to check that chosen candidate; the **test set** is reserved for evaluating results. The system never begins with an unexplained pretrained teacher: its reference for each task is the shared network after training on that task.
+
+A compact stored solution need not be smaller than a replay buffer, and it need not be shared with another task. The memory-saving hypothesis is therefore tested separately rather than assumed.
+
 ## 2. One example from beginning to end
 
 Before describing the formal test, we follow a single digit-classification task from its arrival to the decision about what to remember. This section is meant to answer the practical questions: **What is trained? What is saved? What is compared? And what happens if the comparison fails?** No statistical background is needed to follow the sequence.
@@ -87,11 +93,11 @@ The running learner has:
 - **Unit bank:** compact, potentially reusable feature extractors that have been frozen after publication.
 - **Routes:** small task-specific classifiers (heads) that take features from a unit and produce the task's answer. A route records which physical unit it uses.
 
-The system starts with no published units. On Task 1, it trains the fallback and proposes a compact candidate. On Task 2, it can either train another unit or attempt to attach a new head to the existing Task 1 unit. This second option is **reuse**. Reuse would be measured by observing the **same unit identifier** referenced by more than one published task route.
+The system starts with no published units. It first trains the shared network on Task 1, using that newly trained network as the reference against which a compact Task 1 candidate is evaluated. On Task 2, the shared network is trained on the new task, after which the system can either train another compact unit or attempt to attach a new task-specific head to the encoder stored for Task 1. This second option is **reuse**. Reuse would be measured by observing the **same unit identifier** referenced by more than one published task route.
 
 ### 2.3 From candidate to accepted memory
 
-The learner first trains candidate functions on training data. It then evaluates them on the selection split and chooses a single candidate. This is important: the later acceptance data are reserved to evaluate a candidate **already chosen**, not to search over several candidates until one happens to pass.
+The shared network is trained on the current task and serves as the reference model for that task. Separately, the learner trains candidate compact functions using training data. It then evaluates them on the selection split and chooses a single candidate. This is important: the later acceptance data are reserved to evaluate a candidate **already chosen**, not to search over several candidates until one happens to pass.
 
 Here is an illustrative certificate for Task 1:
 
@@ -115,9 +121,9 @@ These examples illustrate what the mechanism *would* do; they are not claimed to
 
 ### 2.4 What happens after acceptance?
 
-If accepted, the candidate encoder and head become a frozen route for Task 1. On later tasks, the mutable fallback network can keep changing; asking for Task 1 invokes its stored route rather than the new fallback state. The candidate's published function is therefore shielded from subsequent gradient updates.
+If accepted, the candidate encoder and its task-specific head become the stored solution for Task 1. On later tasks, the mutable fallback network can keep changing; asking for Task 1 invokes its stored route rather than the new fallback state. The candidate's published function is therefore shielded from subsequent gradient updates.
 
-If a proposal is rejected, the system does **not** pretend that the task has a certified new memory. It continues to use the mutable fallback and retains replay examples for that unresolved task.
+If a proposal is rejected, the system does **not** pretend that the task has a certified new memory. It leaves the task assigned to the shared network, which remains mutable and may subsequently forget despite replay. It continues to use the mutable fallback and retains replay examples for that unresolved task.
 
 There is a limitation on both branches. A frozen route could have been wrong at publication, and a fallback model can forget. “Published” means the gate's *specified conditions* passed; it does not mean the route is globally correct. “Rejected” avoids one questionable replacement; it does not mean the fallback is safe.
 
@@ -499,6 +505,10 @@ We have one underlying small image dataset, three derived five-task streams, thr
 The prior FAMP legacy CIFAR-100/ResNet experiments are not combined into these CPU tables; the observed failure of that strong-backbone teacher belongs to a different code/configuration cohort.
 
 ---
+
+### 7.7 The exact causal chain supported by the ablations
+
+It is useful to state explicitly what would count as evidence for each proposed benefit. To claim **preservation by freezing**, one must show that later training does not change already published task outputs; the reported zero route drift supports that limited claim. To claim **accuracy benefit from task-specific storage**, one must outperform an appropriately matched shared learner; the observed Split and Rotated results support that within this small protocol, but not under equal memory. To claim **accuracy benefit from the admission certificate**, one must outperform the same publication system with the gate disabled, or show a measured reduction in harmful publications; the current neural accuracy results do not show such an advantage. To claim **memory savings from reusable abstraction**, one must show physical encoder reuse with lower complete stored state at competitive accuracy; strict FAMP shows zero reuse and does not support this claim. These are four different hypotheses, and none follows automatically from another.
 
 ## 8. Threats to validity and scope of claims
 
