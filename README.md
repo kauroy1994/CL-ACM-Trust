@@ -2,6 +2,12 @@
 
 CPU-only research artifact for **ACM TRUST 2027**. This repository tests FAMP's **independent, teacher-relative admission certificate** for publishing immutable learned task routes. It deliberately distinguishes statistical assurance from absolute predictive quality, security, and empirical memory savings.
 
+## Start here: reader-friendly manuscript
+
+**New to continual learning or statistical certificates?** Read the revised [TRUST 2027 manuscript](paper/TRUST_2027_DRAFT.md). It begins with a five-task handwriting example, shows an illustrative acceptance decision using exact finite-sample confidence bounds, explains the data splits and method variants, and interprets the executed experimental results (including negative findings) one research question at a time. A graphical workflow, result figures and a short glossary are included.
+
+The manuscript is a **long-form research draft**, not yet compressed into the venue's final page limit. The source-grounded results are unchanged; claims requiring fresh acceptance data or an independent trust root are explicitly qualified.
+
 ## Reproducible completed experiment
 
 - Datasets: `sklearn.datasets.load_digits` (8×8 grayscale images), in **Split Digits** (five two-class tasks), **Rotated Digits** (five rotated parity-classification domains), and **Corrupted Digits** (five noise domains). These are the small **scikit-learn Digits** benchmark, **not MNIST**, and are not CIFAR-100.
