@@ -5,7 +5,12 @@ import numpy as np
 import pandas as pd
 
 def build(root='results/final/benchmarks', out='results/cpu_20261030'):
-    root=Path(root);out=Path(out);out.mkdir(parents=True,exist_ok=True)
+    root=Path(root)
+    if not root.exists():
+        root=Path('results/reproduction/benchmarks')
+    if not root.exists():
+        raise FileNotFoundError('No raw run records. Run: python -m trustcl --mode all --out results/reproduction')
+    out=Path(out);out.mkdir(parents=True,exist_ok=True)
     rows=[];decisions=[]
     for path in sorted(root.glob('*_s*_o*_*.json')):
         r=json.loads(path.read_text())
