@@ -5,11 +5,12 @@
 
 ### Abstract
 
-A model that learns new tasks sequentially faces a difficult choice: it can retain examples of old tasks and continue updating a shared network, or it can preserve a separate computation that already performs an old task. The second option may prevent forgetting, but it raises a trust question: **when is a learned computation reliable enough to replace stored experience?** We investigate this question through FAMP, an evidence-gated functional-memory system. FAMP learns a candidate task-specific function, chooses among candidate functions using a selection set, and evaluates a single chosen candidate against the current fallback teacher on a separate acceptance set. The acceptance rule combines a conservative confidence bound on *harmful disagreement*—cases the teacher gets right but the candidate gets wrong—with a teacher-competence check and a probability-response agreement check. Accepted functions are frozen and routed to their task; rejected tasks retain the mutable fallback model.
+Consider an artificial intelligence system that learns to recognize handwritten digits. First, it learns to distinguish zeros from ones. Later, it learns to distinguish twos from threes, and then other pairs of digits. The challenge is that learning each new task can damage what the neural network previously learned. A common solution is to save examples from earlier tasks and use them during later training. Another possibility is to save a small part of the network that already solves an earlier task, so that future training cannot change it. This raises a less obvious question: **how can the system decide whether the smaller computation is reliable enough to preserve?** Two networks can have the same overall accuracy but make mistakes on different images. A proposed replacement may therefore lose capabilities the original model had, even if its average accuracy looks equally good.
 
-We examine two different questions: whether the statistical gate behaves as expected under known risks, and whether the resulting learning system is practically useful. A controlled study with 6,000 certificate trials demonstrates conservative empirical upper-bound coverage and no unsafe certified acceptance among 1,800 trials whose known teacher-relative harm exceeds the chosen tolerance. In a separate CPU study, nine methods are evaluated on five-task streams derived from scikit-learn's small handwritten Digits dataset (three seeds and two task orders, 162 complete runs). FAMP obtains mean final accuracies of **99.22%** on Split Digits, **95.47%** on Rotated Digits, and **96.00%** on Corrupted Digits. Although it outperforms basic replay on the first two streams, it **matches ungated functional publication**, is competitive with independently frozen task units, and records **no shared units under its strict policy**. Its reported retained-state proxy is also larger than replay. Thus the evidence supports a reproducible, conditional publication-and-audit procedure, but **not** a demonstrated accuracy advantage from certification, a memory-saving advantage from functional reuse, or a general guarantee under distribution shift. We use the failure to establish reuse as part of the scientific result: trustworthy publication and useful abstraction reuse are distinct problems.
+We study FAMP, a continual-learning system that tests a proposed replacement before storing it. It first trains possible small task-solving networks, chooses one using examples reserved for choosing between alternatives, and checks that choice using a different set of examples. The check pays special attention to images that the existing network classifies correctly but the proposed replacement gets wrong. Because only a limited number of images can be tested, the system calculates a conservative estimate of how frequently these damaging mistakes might occur on similar unseen data. It also checks that the existing network is sufficiently accurate and that the two networks' predicted probabilities are reasonably similar. A replacement that passes is stored without allowing future training to change it; otherwise the task continues to use the existing network. This is a **limited check of replacement risk**, not proof that a stored network is correct.
 
-**Keywords:** continual learning; auditability; statistical assurance; functional memory; harmful disagreement; reliability; confidence bounds
+We evaluate whether this checking procedure behaves as expected and whether the complete learning system is useful. In 6,000 controlled statistical trials with known underlying mistake rates, the estimates were conservative; no unsafe replacement was accepted in the 1,800 trials whose true damaging-mistake rate exceeded the permitted limit. We separately evaluated nine learning methods across 162 CPU training runs using five-task streams built from the small scikit-learn handwritten Digits dataset. FAMP achieved mean final accuracies of **99.22%** for digit pairs, **95.47%** for rotated digits, and **96.00%** for noisy digits. It outperformed ordinary replay on the first two settings, but did not outperform the same method without its checking rule, did not show physical sharing of learned components between tasks, and required more retained memory than replay. On noisy digits, replay-based methods were more accurate. Our results therefore support a reproducible way to inspect decisions about preserving learned computations, while showing that **reliable checking, successful learning, and memory-efficient reuse are three separate achievements**. The current evidence does not establish the latter two as advantages of FAMP.
+
 
 ---
 
@@ -56,6 +57,8 @@ The central empirical findings are mixed. FAMP's frozen paths can retain high ta
 ---
 
 ## 2. One example from beginning to end
+
+Before describing the formal test, we follow a single digit-classification task from its arrival to the decision about what to remember. This section is meant to answer the practical questions: **What is trained? What is saved? What is compared? And what happens if the comparison fails?** No statistical background is needed to follow the sequence.
 
 This section is a guided illustration, not a recorded experimental trace. Its numbers are chosen to make the procedure concrete. Actual aggregated experiments are reported in Section 6.
 
@@ -118,6 +121,8 @@ There is a limitation on both branches. A frozen route could have been wrong at 
 
 ### 2.5 Workflow at a glance
 
+The following diagram follows the same sequence as the handwriting example. Each box corresponds to a real operational decision. A **route** is simply the saved instruction telling the system which small network to use for a particular task.
+
 The following figure is a conceptual diagram of the implemented CPU procedure.
 
 ~~~mermaid
@@ -140,6 +145,8 @@ flowchart TD
 ---
 
 ## 3. Formal problem and trust contract
+
+The preceding example explains the decision in ordinary language. We now translate that decision into mathematical terms so that a reader can inspect exactly what the proposed guarantee says. Readers interested mainly in the experiment can proceed to Section 5; the central idea is that we bound **new mistakes introduced by a replacement**, not all possible mistakes.
 
 ### 3.1 Sequential tasks and known task identity
 
@@ -239,6 +246,8 @@ The implementation also hashes published evidence files. Rechecking those hashes
 
 ## 4. Implemented methods: what changes, and what stays comparable?
 
+To know whether FAMP helps, it is not enough to show that it performs well. We need alternatives that answer different explanations for its success. Perhaps **saving any old examples** is sufficient. Perhaps **freezing a separate network for each task** is sufficient. Perhaps the proposed safety check makes no difference at all. The methods below are chosen to distinguish these explanations.
+
 The project evaluates nine CPU methods. Each uses the same Digits-derived task streams, three configured seeds, and two task orders. We group them conceptually rather than treating nine names as self-explanatory.
 
 ### 4.1 Baselines without published task routes
@@ -295,6 +304,8 @@ The design question remains meaningful: if two tasks genuinely share one physica
 
 ## 5. Experimental protocol
 
+Our evaluation is divided into two studies because the trust question has two parts. First, we test the checking rule in a setting where we **know the true rate of damaging mistakes**, allowing us to see whether its estimates are trustworthy. Second, we train actual neural networks on a small handwriting dataset to see whether the entire procedure improves learning, retention, or memory use. These studies answer different questions and should not be treated as interchangeable.
+
 ### 5.1 Study A: known-risk certificate calibration
 
 Before evaluating the learner, we isolate the verifier from neural-network training.
@@ -336,6 +347,8 @@ The experimental comparison contains \(3\) streams × \(9\) methods × \(3\) see
 ---
 
 ## 6. Results: what happened, and what does it mean?
+
+The results should be read in a particular order. We first ask whether the statistical check is overly confident or overly cautious. We then ask whether the neural learner remembers old tasks. Finally, we use ablations—versions with one design choice changed—to determine **which part of the method actually explains any improvement**. The final question is whether those improvements justify the memory and computation costs.
 
 ### 6.1 RQ1 — Does the statistical gate behave as intended?
 
@@ -444,6 +457,8 @@ The costs also have measurement limits. We report approximated payload bytes and
 ---
 
 ## 7. Discussion: what did we learn about trust?
+
+The most important lesson is not a single accuracy score. The experiments reveal a gap between **protecting a saved task solution** and **discovering a reusable task solution**. A system can succeed at the first without succeeding at the second. This section explains why that distinction changes how the method should be presented to a TRUST audience.
 
 ### 7.1 The certificate answers a narrower question than “Is this memory safe?”
 
