@@ -1,171 +1,546 @@
-# FAMP for ACM TRUST 2027: Evidence-Gated Functional Memory Publication in Continual Learning
+# FAMP: When Can a Continual Learner Trust a Frozen Memory?
+## Evidence-Gated Publication, Independent Audit, and the Limits of Functional Reuse
 
-**Status:** Executed CPU research draft, 30 October 2026. Not peer-reviewed or an accepted submission. This document includes actual experiment findings, including negative results. Final scholarly/novelty review, publisher template conversion, and author approval remain necessary.
+*ACM TRUST 2027 research manuscript draft — revised October 30, 2026. This is a source-grounded, CPU-scale experimental study, not a peer-reviewed or venue-formatted submission. All numerical results reported below come from the checked-in experiment summaries. Illustrative examples are explicitly marked.*
 
-## Abstract
+### Abstract
 
-Replacing stored experience with learned executable functions can potentially reduce continual-learning replay dependence, but a reusable feature is not automatically trustworthy: accepting a bad substitute can permanently misroute an old task. We study FAMP, a transactional functional-memory system in which a fallback learner proposes new or reused frozen feature units, a separate selection split chooses a candidate, and an independent acceptance split produces a teacher-relative harmful-disagreement certificate before route publication. The verifier combines class-stratified one-sided Clopper–Pearson bounds, Bonferroni allocation over tasks and classes, a competence floor, and a probability-response agreement check; published routes remain immutable. We implement a fully reproducible CPU study on five-task variants of the bundled scikit-learn handwritten Digits dataset, evaluating nine methods over three seeds and two orders (162 complete streams), plus 6,000 known-risk certificate simulations. On Split Digits, FAMP achieves 99.22% mean final accuracy versus 95.29% for replay and 96.44% for a DER++-style baseline; on Rotated Digits it achieves 95.47% versus 89.56% and 93.36%; on Corrupted Digits it reaches 96.00% versus 97.13% replay and 97.32% DER++-style. Crucially, FAMP **does not improve over ungated publication**, does not demonstrate an advantage over independent frozen units, and records **zero physically reused units** in its strict-gate runs. Controlled known-risk simulations show conservative empirical certificate coverage and no unsafe publication in 1,800 trials where the predeclared population harm exceeds the tolerance, but do not establish universal safety. The study therefore validates a conditional, independently reproducible assurance mechanism and identifies the limits of its learning and memory utility, rather than claiming a state-of-the-art abstraction learner.
+A model that learns new tasks sequentially faces a difficult choice: it can retain examples of old tasks and continue updating a shared network, or it can preserve a separate computation that already performs an old task. The second option may prevent forgetting, but it raises a trust question: **when is a learned computation reliable enough to replace stored experience?** We investigate this question through FAMP, an evidence-gated functional-memory system. FAMP learns a candidate task-specific function, chooses among candidate functions using a selection set, and evaluates a single chosen candidate against the current fallback teacher on a separate acceptance set. The acceptance rule combines a conservative confidence bound on *harmful disagreement*—cases the teacher gets right but the candidate gets wrong—with a teacher-competence check and a probability-response agreement check. Accepted functions are frozen and routed to their task; rejected tasks retain the mutable fallback model.
 
-## 1. Problem and motivation
+We examine two different questions: whether the statistical gate behaves as expected under known risks, and whether the resulting learning system is practically useful. A controlled study with 6,000 certificate trials demonstrates conservative empirical upper-bound coverage and no unsafe certified acceptance among 1,800 trials whose known teacher-relative harm exceeds the chosen tolerance. In a separate CPU study, nine methods are evaluated on five-task streams derived from scikit-learn's small handwritten Digits dataset (three seeds and two task orders, 162 complete runs). FAMP obtains mean final accuracies of **99.22%** on Split Digits, **95.47%** on Rotated Digits, and **96.00%** on Corrupted Digits. Although it outperforms basic replay on the first two streams, it **matches ungated functional publication**, is competitive with independently frozen task units, and records **no shared units under its strict policy**. Its reported retained-state proxy is also larger than replay. Thus the evidence supports a reproducible, conditional publication-and-audit procedure, but **not** a demonstrated accuracy advantage from certification, a memory-saving advantage from functional reuse, or a general guarantee under distribution shift. We use the failure to establish reuse as part of the scientific result: trustworthy publication and useful abstraction reuse are distinct problems.
 
-A continual learner receives tasks t=1,…,T, with observations (x,y), and—in our task-incremental setting—the correct task ID at inference. Standard alternatives include fine-tuning, retaining examples, regularizing parameter drift, and allocating task-specific modules. A module that appears reusable need not preserve the correctness of an existing function; similarity of hidden states is not a certificate. A deployable publication decision should answer (a) whether the candidate is sufficiently competent, (b) whether it harms examples the teacher was correct on, (c) whether the published route stays unchanged during later training, and (d) what persistent and temporary resources it costs.
+**Keywords:** continual learning; auditability; statistical assurance; functional memory; harmful disagreement; reliability; confidence bounds
 
-We investigate an auditable **publish-or-fallback** rule. The work **does not** identify human-interpretable abstractions, formally certify all neural-network outputs, or establish fault tolerance under a shifted distribution.
+---
 
-## 2. System and assurance contract
+## 1. Introduction: the problem before the method
 
-### 2.1 Transactional learner
+### 1.1 A model that must learn tomorrow without forgetting yesterday
 
-The mutable fallback f_theta trains on current-task examples and retained replay. It can propose (i) a newly trained compact encoder with task head or (ii) a new linear head on an existing frozen encoder. New heads are fit using **training data only**; a disjoint selection split chooses one candidate from the finite set. The acceptance split is not consulted for fitting or selecting candidates and is used **once** for the selected candidate at each task.
+Consider a handwriting system that receives tasks one at a time. Today it learns to distinguish the digit **0 from 1**. Tomorrow it learns **2 from 3**. Later it learns **4 from 5**, **6 from 7**, and **8 from 9**. At the end, we want it to perform all five tasks.
 
-When admitted, the route g_t(x)=h_t(u_{i(t)}(x)) is published with frozen encoder and head. Subsequent tasks may train other components without changing that committed route. If publication is rejected, task inference remains on the mutable fallback. The recorded RAM/persistent-state proxy includes fallback parameters, each published unit and head, replay arrays, and serialized route metadata estimates. It is **not** a hard memory-budget enforcement mechanism, an on-disk checkpoint size, or a measured peak RAM bound in this CPU reimplementation.
+A single neural network updated successively on each new task can overwrite behavior learned earlier, a phenomenon commonly called **catastrophic forgetting**. One familiar response is **experience replay**: retain a small number of examples from earlier tasks and mix them into later training. This helps, but the system must choose which examples to retain, and replay memory is finite.
 
-### 2.2 Teacher-relative risk
+Another response is to save the computation for an old task. For example, after learning 0 versus 1, the system could store a small neural encoder and its classifier and promise not to change them. When asked about that task again, it executes the frozen computation. This can protect the old prediction rule from later training updates, but saving one separate model per task can be expensive. A natural next idea is **reuse**: perhaps an encoder learned for 0 versus 1 also extracts features useful for 2 versus 3. Then a new head could reuse an existing encoder rather than storing another entire encoder.
 
-Let H=1[f_theta(X)=Y and g_t(X)≠Y]. Define p_H=P(H=1) on the acceptance distribution. In classification, R(g_t)−R(f_theta) ≤ p_H, because beneficial student corrections contribute negative excess risk. The system reports a one-sided upper confidence bound U_H. A candidate meets the harm gate when U_H≤epsilon. The teacher-competence floor and probability-response RMSE threshold are **additional heuristics**, not consequences of the excess-risk theorem.
+Reuse is appealing, but it can fail silently. Two networks may produce similar features yet make different mistakes. A small feature extractor may work well on average while failing on a subset of inputs the original system handled correctly. If ordinary training examples are deleted after accepting this replacement, the mistake may be hard to reverse.
 
-With C balanced classes, independent within-class observations, fixed class weights, T predeclared tasks and total family failure probability alpha, the implementation uses classwise one-sided Clopper–Pearson upper limits with tail allocation alpha/(T C). Their known-weight mean is U_H. By a union bound, the joint event that all reported classwise bounds cover their underlying risks has probability at least 1−alpha, **provided** the stated independence, fixed-proposal/acceptance-separation and sampling assumptions hold. Class-specific population priors other than uniform require corresponding weighted bounds.
+This is the motivation for our study. We are not asking only **“Can a network remember?”** We ask:
 
-**Guarantee scope:** This is conditional statistical evidence for teacher-relative risk on the acceptance distribution. It is not a guarantee of low absolute error, independent evaluator authenticity, route usefulness, or risk after distribution shift. It does not protect adaptive re-use of the same acceptance set for post-hoc tuning.
+> **What evidence should a continual learner require before replacing the way it remembers a task?**
 
-### 2.3 Integrity and independent audit
+### 1.2 A concrete example of a risky replacement
 
-Every certificate contains task ID, sample size, classwise counts and bounds, teacher/student measured accuracies, response RMSE, rule checks, policy, and SHA-256 digest. A verifier regenerates a certificate from labels and teacher/candidate predictions. A separate manifest hashes saved evidence files. Hash comparison detects accidental or adversarial modifications *only relative to a trusted expected digest*: an unsigned self-supplied manifest is not an authenticated signature or tamper-resistant ledger. Frozen-route invariance is checked by comparing task predictions before/after all later stages.
+Suppose the current network can distinguish 0 from 1, and we have trained a compact candidate that appears to perform the same job. On a held-out batch, the current network makes 140 correct predictions out of 150, while the candidate makes 141 correct predictions. It is tempting to accept the candidate because its overall accuracy is slightly higher.
 
-## 3. Research questions
+But overall accuracy does not tell the entire story. The candidate might fix three mistakes made by the original network while introducing two **new** mistakes on examples the original network classified correctly. The two additional mistakes are important if the purpose of the replacement is to preserve an existing capability. We call this type of mistake **harmful disagreement**.
 
-**RQ1: Statistical assurance.** Are the certificate bounds calibrated for known harmful-disagreement probabilities, and how much safe-candidate admission do they forgo?
+An assurance-oriented publication rule should examine this asymmetry, not just compare two accuracy percentages. It should also acknowledge sampling uncertainty: observing two harmful cases in 150 images does not mean the true harmful-error probability is exactly 2/150.
 
-**RQ2: Practical admission.** Does risk-aware candidate selection improve task retention or useful publication over naive selection, ungated publication, and independent task-unit allocation?
+### 1.3 Three different questions must not be conflated
 
-**RQ3: Continual-learning quality.** How does the system compare to fine-tuning, experience replay, DER++-style logit replay, and online EWC-style regularization across matched task streams?
+This paper distinguishes three objectives that are often discussed together:
 
-**RQ4: Integrity and costs.** Are published routes stable, can a record be replayed independently, and what are the retained byte proxy and CPU training-time costs?
+1. **Preservation:** once a task's function is stored, do later task updates change that exact function?
+2. **Assurance:** before storing a replacement, can we establish a statistically meaningful, limited statement about its risk relative to a reference model?
+3. **Reuse efficiency:** can one stored encoder actually serve several tasks, saving enough state to justify its selection and auditing overhead?
 
-## 4. Experimental design
+A frozen function gives a straightforward form of *structural preservation*. A statistical admission test can provide *conditional assurance*. Neither property by itself establishes *reuse efficiency*. Our experiments show why this separation matters.
 
-### 4.1 Benchmarks
+### 1.4 Contributions and findings
 
-The sole raw dataset is **scikit-learn Digits** (8×8 grayscale images, 1,797 examples), bundled with scikit-learn. It is **not MNIST**. Three derived streams each contain five tasks:
+We make four bounded contributions. First, we present a readable publication protocol that separates candidate construction, selection, independent acceptance, immutable routing, and retained-state accounting. Second, we give its statistical meaning and assumptions precisely: the confidence bound is **teacher-relative**, not a certificate of absolute correctness. Third, we study the gate under known population risk, so both false admission and unnecessary rejection can be measured. Fourth, we compare the complete learner with replay, EWC- and DER++-style baselines, independent units, and gate ablations using a small, fully CPU-executable task suite.
 
-- **Split Digits:** disjoint digit pairs, relabeled as binary local classes.
-- **Rotated Digits:** odd/even parity classification at 0, 20, 40, 60 and 80 degrees.
-- **Corrupted Digits:** parity classification under progressively larger seeded Gaussian pixel corruption.
+The central empirical findings are mixed. FAMP's frozen paths can retain high task-incremental accuracy on two streams, and its risk certificate behaves conservatively in synthetic calibration. However, the strict implementation does not produce physical encoder sharing in the observed benchmark runs and does not beat an ungated modular learner. The dominant source of accuracy improvement appears to be **task isolation**, not a measured benefit of statistical certification.
 
-Within a seed, original image indices are partitioned by class into train (55 per digit), selection (20), acceptance (75), and test (remaining). For rotated/corrupted domains, an original image may reappear in different tasks **within the same split role**, so this is a task/domain-incremental diagnostic rather than a benchmark with independent images across tasks. Reported performance is task-incremental; task identity is available at inference. Three base seeds (11,23,37) and two task orders (0,1) yield **six paired streams per method/dataset** but only three independent data partitions; order repetitions within seeds are correlated.
+---
 
-### 4.2 Methods and controls
+## 2. One example from beginning to end
 
-Nine executed variants: (1) sequential fine-tuning, (2) example replay, (3) a lightweight **DER++-style** replay-with-logits adaptation, (4) lightweight diagonal **online-EWC-style** regularization, (5) independent frozen task units gated by the same policy, (6) ungated modular allocation/reuse, (7) FAMP risk-aware selection with the full gate, (8) FAMP naive selection, and (9) FAMP with the response check disabled. They are compact CPU research implementations, not exact external authors' reference training or hyperparameter recipes.
+This section is a guided illustration, not a recorded experimental trace. Its numbers are chosen to make the procedure concrete. Actual aggregated experiments are reported in Section 6.
 
-The common neural protocol uses five tasks, 30 epochs/task, Adam lr=0.003, 48 examples/batch and 24 replay examples per unresolved task. Functional units have a 32-hidden/16-feature MLP encoder. The neural admission gate uses teacher competence ≥0.70, epsilon=0.15 and probability-RMSE ≤0.20, with family alpha=0.05 across five tasks. Acceptance data are never used for the candidate-selection heuristic.
+### 2.1 What the learner sees
 
-### 4.3 Calibration
+We use five binary classification tasks created from handwritten images. For the first task, the learner receives pictures of 0s and 1s and must predict a local label: 0 or 1. When the next task arrives, it receives pictures of 2s and 3s. The learner is told which task is being requested at test time; we do **not** ask it to infer the task identity or classify all ten digits with a single ten-way output.
 
-A separate analytic simulation draws teacher labels at 90% accuracy with exactly known classwise harmful disagreement p_H and 100 observations/class. For p_H∈{0,.025,.05,.10,.15,.20,.24,.26,.30,.40}, 120 independent replicates and five task indices create **600 trials per level** and 6,000 trials overall. The calibration tolerance epsilon=0.25 is intentionally different from the neural-gate epsilon=0.15. Calibration trials test the statistical construction, **not** neural adaptation.
+For each digit and each random data split, the implementation allocates:
 
-### 4.4 Metrics
+| Partition | Examples per original digit | What it is allowed to influence |
+|---|---:|---|
+| Training | 55 | Update network parameters and fit candidate heads |
+| Selection | 20 | Choose **one** candidate route before certification |
+| Acceptance | 75 | Certify or reject the selected route |
+| Test | Remaining examples | Evaluate reported performance; never train or select |
 
-Mean end-of-stream test accuracy, acquisition, mean forgetting, admitted tasks, physically shared units, route prediction mismatches, parameter/replay/metadata proxy bytes, CPU wall time, observed held-out candidate harm, empirical bound coverage, naive-versus-certified acceptance, and known-risk unsafe-admission rates. Reported standard deviations are across six correlated seed–order streams; the paired six-stream bootstrap intervals are descriptive and are **not formal uncertainty statements over six independent datasets**.
+Therefore a digit-pair task has **150 acceptance images**, with 75 examples of each local class. Different splits have different jobs. In particular, the acceptance set must not quietly become another training or tuning set.
 
-## 5. Executed results
+### 2.2 The three pieces of state
 
-### Table 1. Final accuracy (%; mean ± sample SD, n=6 paired streams)
+The running learner has:
 
-| Dataset | Fine-tune | Replay | DER++ style | EWC style | Independent units | FAMP |
+- **Fallback network:** a shared, mutable neural network trained on new tasks and stored replay examples. It produces a prediction for a supplied task ID.
+- **Unit bank:** compact, potentially reusable feature extractors that have been frozen after publication.
+- **Routes:** small task-specific classifiers (heads) that take features from a unit and produce the task's answer. A route records which physical unit it uses.
+
+The system starts with no published units. On Task 1, it trains the fallback and proposes a compact candidate. On Task 2, it can either train another unit or attempt to attach a new head to the existing Task 1 unit. This second option is **reuse**. Reuse would be measured by observing the **same unit identifier** referenced by more than one published task route.
+
+### 2.3 From candidate to accepted memory
+
+The learner first trains candidate functions on training data. It then evaluates them on the selection split and chooses a single candidate. This is important: the later acceptance data are reserved to evaluate a candidate **already chosen**, not to search over several candidates until one happens to pass.
+
+Here is an illustrative certificate for Task 1:
+
+| Quantity | Illustrative value | Why it matters |
+|---|---:|---|
+| Teacher accuracy on acceptance data | 140/150 = 93.3% | The reference model must be competent |
+| Candidate accuracy on acceptance data | 141/150 = 94.0% | Descriptive, not sufficient for acceptance |
+| Harmful disagreements in class 0 | 1 of 75 | Teacher correct, candidate wrong |
+| Harmful disagreements in class 1 | 1 of 75 | Teacher correct, candidate wrong |
+| Raw harmful-disagreement rate | 2/150 = 1.33% | A sample statistic, **not** the certificate |
+| Conservative class-weighted upper bound | Approximately **9.49%** | One-sided Clopper–Pearson rule with task/class adjustment |
+| Allowed harmful-disagreement tolerance | **15%** | Predeclared publication limit |
+| Probability-response RMSE | Hypothetical 0.08 | Additional agreement heuristic; limit is 0.20 |
+| Decision | **Accept** | All three publication checks pass |
+
+The 9.49% upper limit is intentionally much larger than the observed 1.33%. The difference represents finite-sample uncertainty and correction for testing across five tasks and two classes.
+
+Now imagine four harmful disagreements in **each** class instead of one. Under the same 75-per-class sample size and confidence allocation, the average upper limit becomes approximately **15.85%**. Even if the candidate's overall accuracy looked acceptable, the harm test would **reject** it because 15.85% exceeds 15%. The system would keep the fallback route for that task.
+
+These examples illustrate what the mechanism *would* do; they are not claimed to be individual measured benchmark episodes.
+
+### 2.4 What happens after acceptance?
+
+If accepted, the candidate encoder and head become a frozen route for Task 1. On later tasks, the mutable fallback network can keep changing; asking for Task 1 invokes its stored route rather than the new fallback state. The candidate's published function is therefore shielded from subsequent gradient updates.
+
+If a proposal is rejected, the system does **not** pretend that the task has a certified new memory. It continues to use the mutable fallback and retains replay examples for that unresolved task.
+
+There is a limitation on both branches. A frozen route could have been wrong at publication, and a fallback model can forget. “Published” means the gate's *specified conditions* passed; it does not mean the route is globally correct. “Rejected” avoids one questionable replacement; it does not mean the fallback is safe.
+
+### 2.5 Workflow at a glance
+
+The following figure is a conceptual diagram of the implemented CPU procedure.
+
+~~~mermaid
+flowchart TD
+ A["New task and its training partition"] --> B["Train mutable fallback + existing replay"]
+ B --> C["Propose: new compact encoder or old encoder + new head"]
+ C --> D["Evaluate proposals on SELECTION split"]
+ D --> E["Choose ONE proposal"]
+ E --> F["Evaluate chosen proposal on ACCEPTANCE split"]
+ F --> G{"Competent teacher AND bounded harm AND response agreement?"}
+ G -->|Yes| H["Publish frozen encoder/head route"]
+ G -->|No| I["Keep fallback route + replay for unresolved task"]
+ H --> J["Count published units, heads, replay and metadata"]
+ I --> J
+ J --> K["Evaluate on TEST split; record results only"]
+~~~
+
+**Figure 1.** The selection set chooses; the acceptance set certifies; the test set measures. None of these roles should be interchanged. The implementation's raw results measure actual publications and the number of physically shared encoders, rather than inferring sharing from feature similarity.
+
+---
+
+## 3. Formal problem and trust contract
+
+### 3.1 Sequential tasks and known task identity
+
+Let tasks arrive as a sequence of distributions \(\mathcal{D}_1,\ldots,\mathcal{D}_T\). A task provides labeled examples \((x,y)\), and a model is evaluated after learning subsequent tasks. We use **task-incremental classification**: the task identifier \(t\) is supplied at inference. This is materially easier than task-agnostic class-incremental learning, and we do not conflate the two.
+
+For a fixed task \(t\), write \(f_t(x)\) for the current shared fallback teacher and \(g_t(x)\) for a proposed executable route. Their classification risks under a specified distribution \(\mathcal{D}_t\) are
+
+\[
+R_t(f_t) = \Pr_{\mathcal{D}_t}[f_t(X)\neq Y], \qquad
+R_t(g_t) = \Pr_{\mathcal{D}_t}[g_t(X)\neq Y].
+\]
+
+We ask whether replacing the fallback route by \(g_t\) incurs too much **additional error on cases the fallback currently gets right**.
+
+### 3.2 Why comparing average accuracy is insufficient
+
+Define two events:
+
+\[
+H_t = \mathbf{1}\{f_t(X)=Y,\ g_t(X)\neq Y\}
+\]
+\[
+G_t = \mathbf{1}\{g_t(X)=Y,\ f_t(X)\neq Y\}.
+\]
+
+\(H_t\) denotes harmful disagreement; \(G_t\) denotes a candidate correcting a teacher mistake. Partitioning disagreements gives the exact relation
+
+\[
+R_t(g_t)-R_t(f_t)=\Pr(H_t=1)-\Pr(G_t=1)
+                  \leq \Pr(H_t=1).
+\tag{1}
+\]
+
+Equation (1) explains the design choice. If we can conservatively bound harmful disagreement, we also bound the candidate's possible *increase* in error relative to its teacher. The inequality is deliberately one-sided: it does not credit improvements in \(G_t\).
+
+It does **not** say that the candidate's absolute risk is small. A teacher with 50% error can be matched perfectly and still be a poor classifier. A separate teacher-competence guard is intended to address this issue pragmatically, but it is an empirical threshold, not a mathematical guarantee of useful absolute performance.
+
+### 3.3 What “confidence” means here
+
+For class \(c\), let \(n_{t,c}\) be the number of independent acceptance observations from that class and \(k_{t,c}\) the number of harmful disagreements among them. The implemented one-sided exact binomial upper bound is
+
+\[
+U_{t,c} =
+\begin{cases}
+1, & k_{t,c}=n_{t,c},\\
+\operatorname{Beta}^{-1}\!\left(1-\frac{\alpha}{TC};
+                     k_{t,c}+1,\ n_{t,c}-k_{t,c}\right),
+& k_{t,c}<n_{t,c}.
+\end{cases}
+\tag{2}
+\]
+
+Here \(\operatorname{Beta}^{-1}\) is a beta-distribution quantile, \(\alpha\) is the familywise nominal failure level, \(T\) is the predeclared number of tasks, and \(C\) is the number of classes. In our binary five-task neural setting, \(\alpha=.05\), \(T=5\), and \(C=2\), so the per-class tail allocation is \(0.05/(5\cdot2)=0.005\).
+
+For known, balanced class weights, the implementation aggregates the classwise limits as
+
+\[
+U_t = \frac{1}{C}\sum_{c=1}^{C} U_{t,c}.
+\tag{3}
+\]
+
+The general version would use explicitly known class priors \(w_c\) and \(U_t=\sum_c w_c U_{t,c}\). A missing class contributes upper bound 1, rather than falsely certifying zero harm.
+
+Under independent within-class draws, the fixed-proposal/held-out sampling contract, the stated class weights, and the per-task validity conditions, the classwise Clopper–Pearson bounds plus a union bound yield the corresponding simultaneous coverage statement. It is a **statistical guarantee conditional on a data-generation protocol**, not a formal proof of a neural network's behavior on all possible inputs.
+
+### 3.4 The complete admission decision
+
+For the neural benchmark, a proposed route is published when all of the following are true:
+
+| Criterion | CPU experimental rule | Status |
+|---|---|---|
+| Reference competence | Measured teacher accuracy on acceptance data ≥ 0.70 | Heuristic guard |
+| Harmful disagreement | \(U_t \leq 0.15\) | Statistical harm gate under assumptions |
+| Response agreement | RMSE between teacher and candidate softmax probabilities ≤ 0.20 | Heuristic guard |
+
+The response agreement is calculated from predicted **class probabilities on the acceptance images**. It is **not** a perturbation robustness certificate, causal intervention test, or guarantee under shifted data. It also is not required by Equation (1); an ablation can reveal whether it improves practical routing.
+
+After these conditions pass, the unit and head are published. The described CPU implementation does **not** enforce a hard byte cap at admission time; it instead records the retained-state proxy after each task. This is a deliberate difference from the earlier, more elaborate FAMP memory-budget proposal and limits the resource claims we can make.
+
+### 3.5 Which assumptions the benchmark satisfies—and which it does not
+
+There are two separate evaluation regimes in this work.
+
+**Controlled calibration** (Section 5.1) draws fresh independent observations for each simulated certificate, with known harmful-disagreement probabilities. This setting is designed to test the statistical calculation.
+
+**Neural continual-learning experiments** (Section 5.2) use fixed partitions from a finite, small image dataset. Training, selection, acceptance, and test image *roles* are separated. However, in the Rotated and Corrupted Digits streams, the **same underlying acceptance image indices are transformed and reused across successive tasks**. Earlier acceptance decisions can affect what the adaptive system publishes, and later proposals can depend on those decisions. Therefore, although no acceptance image is directly used for gradient training or ordinary candidate selection, the neural domain-stream protocol does **not** justify claiming the full sequential familywise statistical guarantee without a more careful dependent-data analysis or fresh taskwise acceptance samples.
+
+We explicitly restrict the reported bound-calibration evidence to the controlled synthetic regime, and interpret real-neural acceptance records as **operational gate decisions** rather than empirically proved familywise coverage statements.
+
+### 3.6 What an audit can and cannot establish
+
+An audit record includes the task identifier, policy, classwise sample counts, observed harmful disagreements, upper bounds, teacher and candidate accuracy, response RMSE, pass/fail checks, and a certificate hash. An independent verifier can recompute the same certificate **when supplied with the original acceptance labels and both prediction vectors**.
+
+The implementation also hashes published evidence files. Rechecking those hashes against a **separately trusted** manifest can detect changes to the files. A self-supplied unsigned hash is not authentication: an attacker who can rewrite both file and manifest can make a matching pair. Further, the compact per-run result summaries do not by themselves contain all per-example prediction vectors needed for complete offline re-verification; this requires reproducing them or retaining those inputs and outputs under a trusted evidence policy. These are important limits of the present audit artifact.
+
+---
+
+## 4. Implemented methods: what changes, and what stays comparable?
+
+The project evaluates nine CPU methods. Each uses the same Digits-derived task streams, three configured seeds, and two task orders. We group them conceptually rather than treating nine names as self-explanatory.
+
+### 4.1 Baselines without published task routes
+
+**Sequential fine-tuning** updates a shared neural model on each incoming task, with no retained replay samples. It measures what happens when later tasks directly overwrite earlier weights.
+
+**Experience replay** stores a small, fixed number of examples from tasks that remain on the fallback route, then trains using both new examples and old memory. It is a conventional baseline for reduced forgetting.
+
+**DER++-style logit replay** augments stored examples with earlier output logits and applies an additional output-matching term during later updates. This is a simplified CPU adaptation, not an exact reimplementation or reference-hyperparameter reproduction of DER++.
+
+**Online-EWC-style regularization** estimates a diagonal Fisher-like parameter-importance measure and penalizes movement away from previous parameter values. It is likewise a small in-house adaptation, not an author-verified reproduction of every choice in the original EWC method.
+
+These controls help determine whether allocating separate frozen functions is useful relative to keeping one evolving network. They do not, by themselves, establish whether the **assurance gate** is beneficial.
+
+### 4.2 Functional-memory controls
+
+**Independent units** train a compact new encoder and head for each task. They use a gate but cannot select a previously published encoder. This is the key control for the *reuse* hypothesis: if FAMP has no shared units and performs like independent units, the outcome may be explained by task isolation.
+
+**Ungated functional publication** uses the same candidate search but publishes its selected route without an assurance veto. It is the key control for the *certification* hypothesis: if ungated and gated systems choose the same routes and achieve the same accuracy, accuracy gains should not be credited to certification.
+
+**FAMP with naive selection** chooses a candidate primarily by its selection accuracy before applying the full admission rule.
+
+**FAMP without the response check** changes the response-related filtering in candidate selection and admission. Because both choice and acceptance behavior may change, the resulting comparison is not a perfectly isolated intervention on one numerical acceptance threshold.
+
+**FAMP (full)** uses a risk-aware selection heuristic followed by a competence guard, independent harmful-disagreement certificate and probability-response agreement check.
+
+### 4.3 Candidate construction and selection
+
+All image vectors have 64 inputs. The shared fallback network uses the 64 image features and a one-hot task identifier. A new task unit has a compact multilayer perceptron encoder (64 → 32 → 16 features) followed by a two-class head. A candidate that reuses an old encoder leaves that encoder frozen and fits a **new head** on current-task training data. Candidate heads and new units are selected using the separate selection partition.
+
+In the risk-aware variant, the learner first screens candidates for plausible harmful-disagreement and probability agreement on selection data, then chooses a candidate with favorable accuracy and lower incremental cost. If none meets this screening heuristic, the implementation falls back to the highest-selection-accuracy candidate and still subjects it to the later independent gate. This heuristic does **not** itself provide a confidence guarantee and must not be presented as the theoretical certificate.
+
+The accepted route's encoder is frozen; future task updates should not change its predictions. We check that property in completed streams.
+
+### 4.4 Resource accounting
+
+The retained-state measure in this study is approximately
+
+\[
+B_{\mathrm{proxy}} =
+B_{\mathrm{fallback\ parameters}}+
+B_{\mathrm{published\ units}}+
+B_{\mathrm{route\ heads}}+
+B_{\mathrm{replay\ arrays}}+
+B_{\mathrm{encoded\ metadata}}.
+\tag{4}
+\]
+
+It does not measure real peak RAM or identical operational budgets across methods, and it is not an enforceable memory-cap comparison. CPU wall-clock time is also reported, but it should be interpreted as a small-workload platform measurement rather than production throughput.
+
+The design question remains meaningful: if two tasks genuinely share one physical encoder, counting the encoder once can save bytes. The experimental question is whether that reuse actually occurs **and** preserves task quality. We report the physical sharing count directly.
+
+---
+
+## 5. Experimental protocol
+
+### 5.1 Study A: known-risk certificate calibration
+
+Before evaluating the learner, we isolate the verifier from neural-network training.
+
+We construct a synthetic teacher that is correct on approximately 90% of independently generated binary-label cases. We then design candidates with specified true harmful-disagreement probabilities \(p_H\): 0, .025, .05, .10, .15, .20, .24, .26, .30, and .40. For each risk level, the simulator performs 120 repetitions at each of five task indices with 100 acceptance observations per class, producing **600 trials per risk level and 6,000 trials overall**. The simulation uses \(\epsilon=.25\) to put known risks just below and above its acceptance boundary.
+
+This is intentionally not a test of continual learning. Its purpose is to ask: *If the true risk is known and acceptance observations are independent, how often does the reported upper bound cover it, and how often would the rule admit a risky candidate?*
+
+We compare certified acceptance with a **naive plug-in rule** that accepts whenever the observed harmful-disagreement fraction is no larger than \(\epsilon\), ignoring its uncertainty. For a genuinely safe candidate, an overly conservative certificate may reject useful memory. For an unsafe candidate, a naive rule may accept due to favorable sampling noise. Both rates matter.
+
+### 5.2 Study B: sequential neural benchmarks
+
+Our CPU experiments use **scikit-learn Digits**, which comprises 1,797 low-resolution 8×8 grayscale images of the ten handwritten digits. This is not the large 28×28 MNIST dataset or CIFAR-100. We form three five-task streams:
+
+| Stream | What changes across five tasks? | What the model predicts | Why the setting is informative |
+|---|---|---|---|
+| **Split Digits** | Digit pair: 0/1, 2/3, 4/5, 6/7, 8/9 | Which member of the known pair? | Tests sequential acquisition of disjoint classification problems |
+| **Rotated Digits** | Rotation angle: 0°, 20°, 40°, 60°, 80° | Even versus odd digit | Tests retention when the visual domain changes while label semantics stay fixed |
+| **Corrupted Digits** | Increasing additive Gaussian noise | Even versus odd digit | Tests whether keeping frozen routes helps when successive domains are perturbed |
+
+These are **three transformations of one underlying dataset**, not three independent externally validated benchmark datasets. Their task labels and known task IDs are part of the experimental design.
+
+For every original digit we partition indices into 55 training, 20 selection, 75 acceptance, and remaining test examples. Original image indices do not cross role boundaries within a seed. For rotated and corrupted streams the *same image* can be used again under a different task transformation **within its original role**. This reuse should not be mistaken for independent test populations or for fresh sequential acceptance sampling.
+
+The training protocol uses five tasks, 30 epochs per task, Adam learning rate 0.003, batch size 48, and up to 24 replay examples per unresolved task. We run seeds 11, 23, and 37 and task orders 0 and 1. Each dataset-method combination has six paired streams (three data seeds × two orders). The two orders under the same seed share the same underlying data partition, so the effective number of independent data splits is **three**, not six.
+
+The experimental comparison contains \(3\) streams × \(9\) methods × \(3\) seeds × \(2\) orders = **162 completed five-task training runs**. Each method is evaluated at the end of the task sequence and after intermediate task stages.
+
+### 5.3 Measures and their interpretation
+
+**Final accuracy** is the mean test accuracy across the five known tasks after the learner has finished all five. **Acquisition** describes performance when a task has just been learned, before subsequent tasks. **Forgetting** measures loss relative to prior post-training task accuracy; it should not be interpreted as beneficial when a model never acquired the task.
+
+**Admission coverage** counts how many proposed routes are published. **Physical sharing** counts stored encoders referenced by more than one task route; it cannot be inferred from an accuracy improvement.
+
+**Empirical test harm** is a sample fraction from a held-out test set, not the known population harm used in Study A. **Bound coverage**, in contrast, is measurable against the known population probabilities in Study A. The two are reported separately rather than merged.
+
+**Stored bytes** are an approximate retained payload, not actual serialized checkpoint size or peak process RAM. **Training time** is the CPU wall time of the small implemented protocol. Baselines do not have identical retained-state footprints, so accuracy comparisons are **not equal-budget Pareto-frontier results**.
+
+---
+
+## 6. Results: what happened, and what does it mean?
+
+### 6.1 RQ1 — Does the statistical gate behave as intended?
+
+Table 1 reports the controlled calibration results. Since each row comes from a known true harmful-disagreement probability, it can reveal overconfidence or conservativeness directly.
+
+**Table 1.** Admission under known risk in the independent-draw simulation. Tolerance \(\epsilon=.25\); 600 trials per risk level.
+
+| True harmful risk \(p_H\) | Certified accept | Naive observed-rate accept | Empirical bound coverage |
+|---:|---:|---:|---:|
+| 0.10 (safe) | 95.67% | 100.00% | 100% |
+| 0.15 (safe) | 32.50% | 100.00% | 100% |
+| 0.20 (safe) | 0.50% | 96.00% | 100% |
+| 0.24 (safe) | 0.00% | 63.50% | 100% |
+| 0.26 (unsafe) | 0.00% | 42.50% | 100% |
+| 0.30 (unsafe) | 0.00% | 6.67% | 100% |
+| 0.40 (unsafe) | 0.00% | 0.00% | 100% |
+
+Source: [calibration_summary.csv](../results/calibration_summary.csv). All ten risk levels, including 0, .025 and .05, are recorded there.
+
+![Known-risk acceptance and coverage figure](../results/calibration/risk_coverage.svg)
+
+**How to read the table.** At true risk 0.26, the candidate is just worse than the permitted 0.25 tolerance. The naive rule nevertheless accepts it **42.5%** of the time because the observed sample rate sometimes falls below 0.25. The certified rule accepts it **0%** of the time in the recorded 600 trials. That is evidence that accounting for sample uncertainty matters.
+
+The other side of the trade-off is equally important. At true risk 0.20—below the tolerance—only **0.5%** of simulated trials result in certified acceptance. At 0.24, none do. The gate is highly conservative near the threshold and may forgo many safe replacements.
+
+No bound-undercoverage event was observed in the 6,000 trials, and no certified acceptance was recorded in the **1,800** trials at true risk 0.26, 0.30, or 0.40. These are finite observations under one synthetic data-generating model, **not proofs** of perfect coverage or zero unsafe acceptance in all settings.
+
+**Insight 1:** A stringent confidence construction can lower false acceptance at the cost of a severe *usefulness bottleneck*. Reporting only “unsafe acceptances avoided” would hide half the result.
+
+### 6.2 RQ2 — Does the complete learner retain old tasks?
+
+Table 2 reports end-of-stream test accuracy. Each value is a mean and sample standard deviation over six paired seed/order streams. The apparent ranking is limited to this dataset, protocol, and in-house baseline implementations.
+
+**Table 2.** Final task-incremental accuracy (%), mean ± SD.
+
+| Stream | Fine-tune | Replay | DER++-style | EWC-style | Independent frozen units | **FAMP** |
 |---|---:|---:|---:|---:|---:|---:|
 | Split Digits | 79.19 ± 2.08 | 95.29 ± 1.23 | 96.44 ± 1.82 | 79.90 ± 2.74 | **99.22 ± 0.62** | **99.22 ± 0.62** |
 | Rotated Digits | 78.06 ± 4.47 | 89.56 ± 1.93 | 93.36 ± 1.23 | 86.26 ± 4.51 | 94.84 ± 2.13 | **95.47 ± 2.20** |
 | Corrupted Digits | 96.90 ± 1.26 | 97.13 ± 1.75 | **97.32 ± 1.60** | 97.00 ± 1.45 | 96.02 ± 2.43 | 96.00 ± 2.30 |
 
-On Split and Rotated Digits, frozen task routes overcome much of the forgetting seen in a small shared model. On Corrupted Digits, replay is already effective, and FAMP is not the highest-accuracy choice. These results are specific to the small sklearn Digits setting and the implemented baseline budgets, which are **not equal-memory matched**.
+Source: [benchmark_summary.csv](../results/benchmark_summary.csv).
 
-### Table 2. FAMP versus controls (percentage-point mean paired differences)
+![Accuracy across benchmark streams](../results/cpu_20261030/figure_accuracy.svg)
 
-| Dataset | FAMP − replay | FAMP − independent | FAMP − ungated | FAMP − naive selector |
-|---|---:|---:|---:|---:|
-| Split Digits | +3.93 | 0.00 | 0.00 | +1.03 |
-| Rotated Digits | +5.90 | +0.63 | 0.00 | 0.00 |
-| Corrupted Digits | −1.12 | −0.01 | 0.00 | −0.71 |
+**Split Digits.** Fine-tuning performs well immediately after individual tasks but loses substantial old-task accuracy by the end. Frozen task routes remain accurate: FAMP finishes at 99.22%, compared with 95.29% for replay. But the **independent-unit** method also finishes at 99.22%. Thus the result supports keeping old task computations stable, not specifically *sharing* the same computation across tasks.
 
-Across the three primary streams, FAMP admits 5.0/5.0 routes on average and shares **0.0** physical units. It therefore provides no observed memory-sharing advantage. Naive candidate selection admits fewer proposals on Split and Corrupted Digits, but this is selection-policy sensitivity, not evidence that the full risk certificate beats an ungated policy: the latter achieves identical accuracies on all three stream families in this experiment.
+**Rotated Digits.** The visual appearance changes from task to task while parity labels stay the same. FAMP finishes at 95.47%, a 5.90-percentage-point mean improvement over simple replay, and 0.63 points above independent units. That latter difference is small; with only three independent data seeds and correlated task orders, it is insufficient evidence of a robust algorithmic superiority.
 
-### Table 3. Published-state and training cost (means)
+**Corrupted Digits.** The shared system already handles the noise-domain changes relatively well. Replay obtains 97.13%, DER++-style reaches 97.32%, and FAMP reaches 96.00%. Here allocating frozen routes is **not** the best accuracy strategy. The result weakens any claim that task-specific publication is always preferable to replay.
 
-| Dataset | FAMP KiB | Replay KiB | Independent KiB | FAMP CPU seconds | Replay seconds |
+**Insight 2:** The benefit of freezing task computations depends on the task sequence. It is largest where sequential fine-tuning forgets; it is less useful when ordinary replay already retains performance.
+
+### 6.3 RQ3 — Is the benefit caused by certification or by task isolation?
+
+This is the decisive ablation. Table 3 adds the controls that are missing from a simple comparison against replay.
+
+**Table 3.** FAMP versus mechanism controls. Values are mean final accuracy (%) and mean published routes per five-task stream; shared units count unique encoders referenced by multiple routes.
+
+| Stream | Full FAMP accuracy | Independent accuracy | Ungated accuracy | Naive-selection accuracy | Full FAMP published / 5 | Full FAMP shared encoders |
+|---|---:|---:|---:|---:|---:|---:|
+| Split Digits | **99.22** | **99.22** | **99.22** | 98.19 | 5.00 | **0** |
+| Rotated Digits | **95.47** | 94.84 | **95.47** | **95.47** | 5.00 | **0** |
+| Corrupted Digits | 96.00 | 96.02 | **96.00** | 96.71 | 5.00 | **0** |
+
+Source: [benchmark_summary.csv](../results/benchmark_summary.csv) and [admission_summary.csv](../results/admission_summary.csv).
+
+![Publication frequency by method](../results/cpu_20261030/figure_admissions.svg)
+
+The full FAMP method publishes a route for **every task in every measured stream**. Its strict-gate accepted routes are all **newly allocated units**; zero encoders are shared between two task routes. The independently trained task-unit baseline is therefore a particularly strong explanation for its accuracy. The ungated method obtains **identical final accuracy** across all three stream families. In these recorded conditions, the statistical gate is **not responsible for an observed test-accuracy improvement**.
+
+The naive-selection FAMP variant admits an average of 2.50 routes on Split Digits and 1.83 on Corrupted Digits, compared with five for the full risk-aware selector. This suggests that selecting plausible low-harm candidates before the independent gate matters for *acceptance frequency*. However, on Corrupted Digits the naive variant's final accuracy (96.71%) is actually **higher** than FAMP's (96.00%). We cannot treat higher admission as synonymous with higher predictive quality.
+
+An additional no-response variant produces some physical sharing: mean shared encoders of approximately **1.17** on Split Digits and **1.00** on Corrupted Digits. Yet its corresponding accuracies are **98.27%** and **95.87%**, below strict FAMP's 99.22% and 96.00%. Because this ablation modifies both candidate screening and publication behavior, it does not prove that one RMSE threshold alone caused the trade-off. It does suggest that the proposed response-agreement heuristic can restrict reuse, and it motivates studying reliability and usefulness jointly.
+
+**Insight 3:** We must reject two attractive but unsupported stories: (i) that FAMP's higher accuracy than replay demonstrates useful encoder sharing, and (ii) that the full assurance gate improves accuracy over an ungated functional-memory policy. Neither is established by these experiments.
+
+### 6.4 RQ4 — Does publication prevent later changes to committed functions?
+
+The CPU implementation records the predictions made by an accepted task route at publication and checks them again after the remaining tasks are trained. The summary tables report **zero route-prediction mismatches** for the executed streams.
+
+This result has a clear, narrow interpretation: when the encoder and head are frozen and later updates do not write to them, the committed route continues to return the same predictions on those evaluated inputs. That is an important reproducible preservation property. It does not tell us whether the original predictions were correct, nor how they would behave under new corruption, adversarial perturbation, or unseen populations.
+
+The evidence auditor can also regenerate a certificate when given its original acceptance labels and predictions, and it can compare file hashes against a trusted reference manifest. Unit tests verify selected integrity and certificate-replay behaviors. The current published per-run summaries alone are not a complete authenticated per-example audit trail, and we do not describe them as one.
+
+**Insight 4:** Reliable *immutability* is an engineering property; trustworthy *correctness* additionally requires appropriate evidence and assumptions.
+
+### 6.5 RQ5 — How much does the mechanism cost?
+
+**Table 4.** Mean retained-state proxy and CPU training time. Memory numbers are *not* hard-cap-matched or peak-RAM measurements.
+
+| Stream | FAMP state (KiB) | Replay state (KiB) | Independent state (KiB) | FAMP training (s) | Replay training (s) |
 |---|---:|---:|---:|---:|---:|
 | Split Digits | 74.91 | 54.85 | 74.92 | 0.55 | 0.39 |
 | Rotated Digits | 74.92 | 54.85 | 73.58 | 2.30 | 1.51 |
 | Corrupted Digits | 74.92 | 54.85 | 74.92 | 2.21 | 1.52 |
 
-The strict system has **higher retained-state proxy cost than replay** in this setup. The route stability counter found zero prediction changes after subsequent tasks for previously committed routes. This is structural immutability, not proof of semantic generalization or formal verification of learned functions.
+Source: [benchmark_summary.csv](../results/benchmark_summary.csv).
 
-### Table 4. Known-risk certificate calibration (epsilon=0.25)
+In this implementation, strict FAMP's retained-state proxy is roughly **20 KiB larger than replay** on every stream, and it takes longer to train. A method that stores several frozen task-specific networks can retain excellent accuracy while consuming more memory than a shared network with a modest replay buffer. With no observed physical reuse in the strict policy, the proposed storage benefit does not materialize.
 
-| True p_H | Certified acceptance | Naive observed-rate acceptance | Observed upper-bound coverage |
-|---:|---:|---:|---:|
-| 0.10 | 95.67% | 100.00% | 100% |
-| 0.15 | 32.50% | 100.00% | 100% |
-| 0.20 | 0.50% | 96.00% | 100% |
-| 0.24 | 0% | 63.50% | 100% |
-| 0.26 | 0% | 42.50% | 100% |
-| 0.30 | 0% | 6.67% | 100% |
-| 0.40 | 0% | 0% | 100% |
+The costs also have measurement limits. We report approximated payload bytes and CPU wall time from one small implementation, not equal-resource Pareto frontiers, deployment energy, peak RAM, production inference latency, or storage under a hard operational cap.
 
-Each row reports 600 simulated trials. The high conservativeness is deliberate: dividing alpha across tasks and classes protects simultaneous coverage at the cost of many false rejections around the threshold. Across the 1,800 trials at p_H>0.25, no certified unsafe acceptance occurred (0/1,800). This is finite empirical evidence only, not a proof of zero underlying unsafe acceptance. No violation of the simulated known-risk upper bound was observed in 6,000 draws; this also does not establish universal correctness under other models.
+**Insight 5:** Trust-related overhead is a real system cost. Any future claim of a beneficial replacement must account for both the stored function and the evidence needed to justify publishing it.
 
-### RQ-specific synthesis
+---
 
-**RQ1:** Within a controlled population model, the stratified confidence bound is conservative and empirically covers the declared risk. Useful admission falls sharply near the tolerance boundary.
+## 7. Discussion: what did we learn about trust?
 
-**RQ2:** Risk-aware selection is more useful than naive accuracy-only selection on Split Digits but fails to beat ungated publication and shows no genuine physical unit sharing. The functional-memory reuse hypothesis remains unsupported by these runs.
+### 7.1 The certificate answers a narrower question than “Is this memory safe?”
 
-**RQ3:** Frozen task-specific routes are competitive on Split/Rotated Digits but not Corrupted Digits, and they cost more retained state than replay. The result may be attributable to task isolation, not assurance.
+Our statistical test asks whether the candidate introduces too many errors **where the current teacher was correct**, under the data distribution and independence assumptions used by the acceptance procedure. It says nothing directly about whether the teacher was correct enough in absolute terms, whether class priors will change, or whether an unseen subgroup will fail. A competent-teacher heuristic provides a screening rule, but its sampled threshold is not a formal lower-confidence bound on absolute teacher accuracy.
 
-**RQ4:** Route predictions do not drift; file-hash and independent certificate replay tests pass. These integrity properties provide observable audit evidence only relative to a trusted reference. They do not prove safety from data/model compromise or distributional shift.
+The controlled calibration indicates that accounting for uncertainty can materially reduce unsafe admission, but it also shows that a gate can become too strict to admit many useful candidates. The essential design objective is therefore **risk–coverage**, not minimizing unsafe acceptances in isolation.
 
-## 6. Discussion
+### 7.2 A strong learner may not be a strong reuse system
 
-### Why this is a useful negative finding
+The most surprising empirical observation is not FAMP's high Split Digits accuracy; it is that **the strict policy achieves that accuracy with zero shared encoders**. In effect, it stores separate models for separate tasks. This is a valid and sometimes effective continual-learning baseline, but it does not validate the original motivation of retaining a *shared functional abstraction*.
 
-Stable executable routes prevent post-publication parameter updates from changing earlier task functions, but *immutability does not imply reuse*. The strict gate publishes five distinct encoders for five tasks, so the system resembles a small collection of independent frozen models. The independent baseline matches FAMP on Split and almost matches on Corrupted, and the ungated control matches FAMP exactly. Therefore it would be misleading to attribute accuracy advantages over fine-tuning or replay to the certificate or to reusable abstraction discovery.
+The matched independent-unit and ungated controls prevent an otherwise misleading conclusion. High accuracy may result from preservation via isolation, while neither reuse nor the certificate adds measurable accuracy.
 
-### Assurance and utility trade-off
+### 7.3 The no-response ablation creates a productive tension
 
-Class-stratified CP bounds combined with Bonferroni spending are transparent and auditable, but strict sample requirements lead to low acceptance for candidates near the tolerated harm boundary. The certificate's excess-risk relation is teacher-relative and assumes an independent acceptance draw for a fixed proposal. Weak teachers, re-used acceptance data, adaptive threshold tuning or distribution shift are outside that assurance contract. A high rejection rate may protect publication decisions while leaving the fallback learner inaccurate and vulnerable to forgetting.
+Allowing the no-response variant to consider a broader set of candidates produces a small amount of reuse in two streams, but it does not improve accuracy. This is not a paradox. Features can be reusable in the mechanical sense—one encoder has multiple heads—yet be worse for a particular task than a newly trained encoder. Conversely, a restrictive gate can protect quality while making sharing unlikely.
 
-### Engineering cost
+This suggests an important empirical distinction for future studies: **physical sharing, task performance, and statistical certification should be measured independently**, not collapsed into one binary “successful abstraction” label.
 
-Training task-specific units for every task uses additional time and model memory; candidate discovery costs are incurred even if a proposal is rejected. The reported memory proxy is not peak resident memory, actual compressed disk footprint, nor a controlled equal-byte comparison. It is consequently insufficient to claim a cost improvement. A defensible deployment should report these quantities separately, alongside published manifests and audit overhead.
+### 7.4 Why synthetic coverage is not a certificate for the neural suite
 
-### CPU reduction and external validity
+The calibration experiment has known population risks and freshly drawn examples, making the bound interpretable. The rotated and corrupted neural tasks reuse original acceptance-image indices across tasks. In an adaptive learner, past acceptance decisions can affect future candidate proposals. Hence the experimental neural acceptance stream does not establish the same fresh-sample conditions needed for a sequential familywise guarantee. Its accepted routes are evidence of how the implementation behaved, but the synthetic coverage result cannot simply be transferred onto them.
 
-All three benchmark families derive from one small 8×8 image dataset. Rotated and corrupted parity tasks involve repeated source-image indices across domain tasks within each split role. The study cannot be extrapolated to CIFAR-100, class-incremental learning, Transformers, diffusion models, large pretrained backbones, or long task streams. A prior legacy large-backbone FAMP experiment collapsed to chance-level learning and must not be included as positive evidence.
+A stronger system-level guarantee would require a trusted, independent evaluation protocol with genuinely fresh taskwise evidence and an audit model specifying who controls the verifier, the labels, and the manifest. Those properties are not demonstrated here.
 
-## 7. Threats to validity and reproducibility
+### 7.5 What counts as useful trustworthy adaptation?
 
-1. **Dataset scope:** one small dataset, engineered related domains, known task identity.
-2. **Baseline fidelity:** modest in-house EWC/DER++ style adaptations rather than paper-author protocols.
-3. **Statistical unit:** two orders within one seed are dependent; n=6 descriptive samples, 3 distinct splits.
-4. **Assurance assumptions:** independent acceptance observations, declared class weights, fixed proposal, no repeated acceptance-set peeking, static distribution.
-5. **Low bound-violation counts:** zero events with finite trials cannot establish an exact zero population rate.
-6. **Integrity model:** self-hashed artifacts require independent trust root for authenticity.
-7. **Cost model:** no equal-state budget and no measured CPU peak RSS; memory claim is only a payload proxy.
-8. **Method improvement:** the new risk-aware selection heuristic is evaluated as an additional variant, not a mathematically guaranteed selection optimization.
-9. **No proven reuse:** no physical sharing occurred for strict FAMP in the executed streams.
+There are two failure modes worth keeping separate. First, a system may accept a candidate that exceeds the permitted teacher-relative harm. Second, it may correctly reject every candidate and still perform poorly because the fallback is inadequate or forgetting. Avoiding the first does not solve the second.
 
-## 8. Conclusion
+We therefore recommend reporting **three axes simultaneously**: verified risk relative to a declared reference, useful publication coverage, and end-to-end learning performance under complete resource accounting. In this study, the verifier passes a controlled statistical sanity check, but the complete system does not yield a demonstrated advantage over simpler modular publication.
 
-This CPU-scale study implements and tests a transparent, independently replayable rule for publishing immutable executable task routes in continual learning. Its statistical component gives conservative teacher-relative harmful-disagreement certificates under explicit assumptions; a 6,000-trial controlled simulation observed full bound coverage and no unsafe certified acceptance among the 1,800 simulated cases above the harm tolerance. In three scikit-learn Digits-derived task streams and 162 matched training runs, functional routes achieve competitive retention, particularly under digit-pair and rotation sequences. However, strict FAMP matches ungated publication, shows no physical module sharing, uses more retained-state bytes than replay, and is outperformed by DER++-style logit replay on corrupted domains. The evidence therefore supports an **auditable publication protocol and measured safety–utility trade-off**, not a demonstrated new abstraction-learning method or a superior accuracy–memory frontier. The next scientific challenge, outside the claims of this completed artifact, is to produce genuinely transferable units whose certified reuse improves independent-unit and replay controls.
+### 7.6 Limits of generalization
 
-## Background references (verify exact venue metadata before manuscript submission)
+We have one underlying small image dataset, three derived five-task streams, three independent data seeds, and small MLP implementations. The experiment does not test task-agnostic class-incremental learning, MNIST, CIFAR-100, image-scale pretrained backbones, language models, or long-running open-world adaptation. The simplified EWC- and DER++-style methods should not be interpreted as definitive rankings of those published algorithms. Finally, two task orders from the same data seed are dependent, so six-stream bootstrap intervals are descriptive rather than strong evidence of cross-dataset superiority.
 
-- Kirkpatrick et al. (2017), *Overcoming catastrophic forgetting in neural networks*, PNAS — online EWC motivation.
-- Buzzega et al. (2020), *Dark Experience for General Continual Learning: a Strong, Simple Baseline*, NeurIPS — replay-with-logits motivation.
-- Rebuffi et al. (2017), *iCaRL: Incremental Classifier and Representation Learning*, CVPR — replay-based continual learning background.
-- Rusu et al. (2016), *Progressive Neural Networks*, arXiv — immutable modular pathways.
-- Clopper and Pearson (1934), *The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial*, Biometrika — exact binomial confidence bound.
-- Mendez and Eaton (2021), *Lifelong Learning of Compositional Structures*, ICLR — modular reuse.
-- Scikit-learn documentation, `load_digits` — bundled small Digits dataset.
+The prior FAMP legacy CIFAR-100/ResNet experiments are not combined into these CPU tables; the observed failure of that strong-backbone teacher belongs to a different code/configuration cohort.
 
-**Review/ethics note:** The code and draft used AI assistance. Final conference paper should disclose this according to the CFP, check reference details, and undergo human author approval. Do not represent this markdown draft as an accepted or refereed paper.
+---
+
+## 8. Threats to validity and scope of claims
+
+| Potential concern | What the current evidence supports | What it does **not** support |
+|---|---|---|
+| Small Digit data | Reproducible five-task CPU comparisons | State-of-the-art accuracy on widely used large-image CL benchmarks |
+| Known task identity | Task-specific routing and retention | Task-agnostic recognition of all tasks/classes |
+| Baseline variants | Controlled small-model comparisons | Exact reference reproductions of EWC or DER++ |
+| Three data seeds | Paired exploratory replication | Strong general statistical claims from six independent seeds |
+| Certificate simulation | Calibrated behavior under independent synthetic draws | Guaranteed coverage after adaptive reuse of neural acceptance examples |
+| File hashes | Change detection against trusted hashes | Authenticated provenance or tamper-proof evidence |
+| Zero route drift | Immutability on evaluated inputs | General semantic robustness or low absolute error |
+| Zero strict sharing | Accurate report of physical reuse in this run | Discovery of transferable shared abstractions |
+| Memory proxy | Relative small-model retained payload accounting | Equal-memory superiority, peak RSS or on-disk compression |
+
+---
+
+## 9. Conclusion
+
+This study began with an intuitive idea: when a continual learner finishes a task, perhaps it can retain the *computation that solves the task* instead of storing more examples. We examined the trust question hidden inside that idea. Before replacing a task's old learning path with a compact frozen function, the system should choose a candidate without peeking at its acceptance data, measure the candidate's harmful disagreements with a reference predictor, account for sampling uncertainty, and preserve enough evidence to explain its decision.
+
+The resulting FAMP CPU implementation demonstrates a reproducible evidence-gated publication workflow. In an independent-draw calibration study, its class-stratified confidence bounds were conservative and avoided observed unsafe certified acceptance in the tested above-threshold risk conditions, while rejecting many genuinely safe candidates near the boundary. Across 162 complete CPU continual-learning streams, frozen functional routes retained competitive accuracy on Split and Rotated Digits, but the strict system published **no physically shared encoders**, consumed more state than replay, and **did not beat ungated functional publication**. On Corrupted Digits, replay and DER++-style replay outperformed FAMP.
+
+The conclusion is therefore narrower—and more informative—than a claim of a universally trustworthy abstraction learner. **A publication mechanism can be auditable without being useful for reuse, and a frozen task model can preserve accuracy without demonstrating shared abstraction.** A complete trustworthy continual-learning system must establish statistical validity, genuine reuse utility, and end-to-end resource effectiveness separately. The present study provides an explicit experimental framework for making those distinctions and documents where its tested implementation succeeds and falls short.
+
+---
+
+## 10. Reproducibility, evidence, and reader's guide to the repository
+
+The implementation and results live in the companion repository:
+
+- [CPU continual learner and method variants](../trustcl/continual.py): training, replay, candidate generation, selection, publication, and per-task evidence.
+- [Independent assurance certificate](../trustcl/assurance.py): harmful-disagreement calculations, Clopper–Pearson bounds, and deterministic certificate replay.
+- [Known-risk calibration simulator](../trustcl/calibration.py): distribution-level risk is specified before drawing sample predictions.
+- [Integrity and certificate auditor](../trustcl/audit.py): manifest hashing and certificate recomputation when prediction evidence is supplied.
+- [Aggregated benchmark results](../results/benchmark_summary.csv), [admission results](../results/admission_summary.csv), [paired effects](../results/paired_effects.csv), and [calibration results](../results/calibration_summary.csv).
+- [Archived per-run evidence](../artifacts/executed_cpu_evidence.zip), [execution provenance](PROVENANCE.md), and [README reproduction instructions](../README.md).
+
+The benchmark results were produced using CPU-only sklearn Digits tasks, three seeds and two orders, rather than the earlier FAMP GPU configuration. To reproduce, install the repository's dependencies and run the documented package commands. The retained evidence archive contains individual run records, whereas the files linked above are easier-to-read summaries. Numerical averages were copied from those verified summaries; illustrative numbers in Section 2 are explicitly marked as examples.
+
+### Short glossary for first-time readers
+
+| Term | Meaning in this paper |
+|---|---|
+| **Continual learning** | Training a system on tasks that arrive one after another while trying to retain old capabilities |
+| **Forgetting** | An earlier task becomes less accurate after learning later tasks |
+| **Replay** | Training on saved examples from earlier tasks during new-task learning |
+| **Fallback teacher** | The mutable shared model used as the reference before publishing a task-specific replacement |
+| **Functional unit** | A compact frozen neural feature extractor that could potentially be reused |
+| **Route** | A task ID's pointer to a functional unit plus a task-specific prediction head |
+| **Publication** | Committing a chosen route to persistent, immutable task memory |
+| **Harmful disagreement** | Teacher correct but candidate wrong on the same labeled example |
+| **Upper confidence bound** | Conservative limit on a population error rate inferred from finitely many observations |
+| **Admission coverage** | How many proposed task routes are accepted |
+| **Physical reuse** | Two or more committed tasks refer to the same stored encoder |
+| **Audit manifest** | Record identifying evidence files and their expected digests; authenticity requires an independent trust root |
+
+### Related-work anchors (bibliographic verification required before venue submission)
+
+EWC: Kirkpatrick et al., *Overcoming catastrophic forgetting in neural networks* (PNAS, 2017). DER/DER++: Buzzega et al., *Dark Experience for General Continual Learning* (NeurIPS, 2020). Replay and exemplar approaches: Rebuffi et al., *iCaRL: Incremental Classifier and Representation Learning* (CVPR, 2017). Frozen modular learning: Rusu et al., *Progressive Neural Networks* (2016), and Mendez and Eaton, *Lifelong Learning of Compositional Structures* (ICLR, 2021). Statistical intervals: Clopper and Pearson, *The Use of Confidence or Fiducial Limits Illustrated in the Case of the Binomial* (Biometrika, 1934). Dataset: scikit-learn's load_digits documentation.
+
+**Scholarly status:** This is a substantially revised, more accessible research draft backed by the available evidence, but it is not an accepted paper, not a new set of experiments, and not yet a camera-ready ACM-format manuscript. Final citation, novelty, protocol-validity, page-limit, and GenAI-disclosure checks require author review.
