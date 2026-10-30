@@ -403,7 +403,7 @@ This is the decisive ablation. Table 3 adds the controls that are missing from a
 
 Source: [benchmark_summary.csv](../results/benchmark_summary.csv) and [admission_summary.csv](../results/admission_summary.csv).
 
-![Publication frequency by method](../results/cpu_20261030/figure_admissions.svg)
+The admission counts in Table 3 are aggregated from the [executed admission records](../results/admission_summary.csv); no unverified plot is implied.
 
 The full FAMP method publishes a route for **every task in every measured stream**. Its strict-gate accepted routes are all **newly allocated units**; zero encoders are shared between two task routes. The independently trained task-unit baseline is therefore a particularly strong explanation for its accuracy. The ungated method obtains **identical final accuracy** across all three stream families. In these recorded conditions, the statistical gate is **not responsible for an observed test-accuracy improvement**.
 
