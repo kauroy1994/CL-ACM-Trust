@@ -42,3 +42,9 @@ All training is CPU-compatible and uses scikit-learn's bundled Digits; no separa
 This is an evaluated **CPU-scale artifact**, not a claim of state-of-the-art general continual learning. Standard datasets are tiny 8×8 images; there is no large-scale MNIST/CIFAR-100/ImageNet verification in this CPU submission. The risk certificate is valid only for its sampling/independence assumptions. The trust model requires a trusted evidence root; unsigned SHA-256 manifests provide tamper **detection against a trusted digest**, not cryptographic authenticity. Stronger theory and more representative benchmarks would be necessary for broader claims.
 
 Source legacy: prior FAMP MLSys notebook from the project, adapted and rewritten for the TRUST assurance-focused study; not a reproduction of the original legacy training grid.
+
+## Complete archived run-level evidence
+
+The complete executed campaign is deposited **inside this repository** as [`artifacts/executed_cpu_evidence.zip`](artifacts/executed_cpu_evidence.zip) (SHA-256 `b319f688b03001299de5c7ee5eaf5d502fd452f891898d2ab321c5556ef34d8c`). It contains 162 individual benchmark JSON records, task-level acceptance evidence, the 6,000 calibration trials, generated plots, and full report inputs. No training is needed to inspect these results.
+
+To regenerate the figures and tables locally, extract the archive **at the repository root** so paths begin with `results/`, then run `python -m trustcl.report` (after installing `requirements.txt`). Version-controlled condensed tables and native SVG figures are also in [`results/cpu_20261030/`](results/cpu_20261030/) and [`results/calibration/`](results/calibration/). See [`paper/PROVENANCE.md`](paper/PROVENANCE.md) for scope and integrity limitations.
